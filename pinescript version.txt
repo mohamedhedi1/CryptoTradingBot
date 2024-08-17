@@ -1,0 +1,115 @@
+//@version=5
+strategy("Combined Strategy", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500, max_bars_back=5000, process_orders_on_close=true)
+
+// ALMA Cross
+lengthFast = 20
+lengthSlow = 50
+src = close
+fastALMA = ta.alma(src, lengthFast, offset=0.85, sigma=6)
+slowALMA = ta.alma(src, lengthSlow, offset=0.85, sigma=6)
+isUpTrend = ta.crossover(fastALMA, slowALMA)
+isDownTrend = ta.crossunder(fastALMA, slowALMA)
+
+// Kokoabe rsistratV2
+rsiLength = 50
+fako = close - close[rsiLength]
+isPositiveMomentum = fako > 0
+
+// Alpha Trend Supertrend
+lengthSupertrend = 10
+multiplierSupertrend = 3.0
+hpf = ta.wma(high + low + close, 3) / 3
+atr = ta.atr(10)
+upperBand = hpf + multiplierSupertrend * atr
+lowerBand = hpf - multiplierSupertrend * atr
+isAboveSupertrend = close > upperBand
+isBelowSupertrend = close < lowerBand
+
+// Combine the conditions
+isBuySignal = isUpTrend and isPositiveMomentum
+isSellSignal = (close < ta.sma(close, 165) and fako < -0.0163)
+
+// Plotting
+plotshape(isBuySignal, title="Buy Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(isSellSignal, title="Sell Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plot(isUpTrend ? high + math.abs(high-low)/2 : low - math.abs(high-low)/15, 
+     color=isUpTrend ? color.green : color.red, 
+     style=plot.style_cross)
+plot(isPositiveMomentum ? high + 2 * math.abs(high-low)/2 : low - 2 * math.abs(high-low)/2,
+     color=color.rgb(51, 243, 33),
+     style=plot.style_cross)
+plot(upperBand, title="Boiling Band Up", color=color.blue)
+plot(lowerBand, title="Boiling Band Down", color=color.blue)
+plot(slowALMA, title="Slow Alma", color=color.rgb(203, 255, 82))
+plot(fastALMA, title="Fast Alma", color=color.rgb(203, 255, 82))
+
+// Input settings
+ccimomCross = input.string('CCI', title='Entry Signal Source', options=['CCI', 'Momentum'], tooltip='CCI or Momentum will be the final source of the Entry signal if selected.')
+ccimomLength = input.int(10, minval=1, title='CCI/Momentum Length')
+useDivergence = input.bool(true, title='Find Regular Bullish/Bearish Divergence', tooltip='If checked, it will only consider an overbought or oversold condition that has a regular bullish or bearish divergence formed inside that level.')
+rsiOverbought = input.int(65, minval=1, title='RSI Overbought Level', tooltip='Adjusting the level to extremely high may filter out some signals especially when the option to find divergence is checked.')
+rsiOversold = input.int(35, minval=1, title='RSI Oversold Level', tooltip='Adjusting this level extremely low may filter out some signals especially when the option to find divergence is checked.')
+rsiLength2 = input.int(14, minval=1, title='RSI Length')
+plotMeanReversion = input.bool(false, title='Plot Mean Reversion Bands on the chart', tooltip='This function doesn\'t affect the entry of signal but it suggests buying when the price is at the lower band, and then sell it on the next bounce at the higher bands.')
+emaPeriod = input(200, title='Lookback Period (EMA)')
+bandMultiplier = input.float(1.8, title='Outer Bands Multiplier', tooltip='Multiplier for both upper and lower bands')
+
+// CCI and Momentum calculation
+momLength = ccimomCross == 'Momentum' ? ccimomLength : 10
+mom = close - close[momLength]
+cci = ta.cci(close, ccimomLength)
+ccimomCrossUp = ccimomCross == 'Momentum' ? ta.cross(mom, 0) : ta.cross(cci, 0)
+ccimomCrossDown = ccimomCross == 'Momentum' ? ta.cross(0, mom) : ta.cross(0, cci)
+
+// RSI calculation
+up = ta.rma(math.max(ta.change(src), 0), rsiLength2)
+down = ta.rma(-math.min(ta.change(src), 0), rsiLength2)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - 100 / (1 + up / down)
+oversoldAgo = rsi <= rsiOversold or rsi[1] <= rsiOversold or rsi[2] <= rsiOversold or rsi[3] <= rsiOversold
+overboughtAgo = rsi >= rsiOverbought or rsi[1] >= rsiOverbought or rsi[2] >= rsiOverbought or rsi[3] >= rsiOverbought
+
+// Regular Divergence Conditions
+bullishDivergenceCondition = rsi > rsi[1] and rsi[1] < rsi[2]
+bearishDivergenceCondition = rsi < rsi[1] and rsi[1] > rsi[2]
+
+// Entry Conditions
+longEntryCondition = ccimomCrossUp and oversoldAgo and (not useDivergence or bullishDivergenceCondition)
+shortEntryCondition = ccimomCrossDown and overboughtAgo and (not useDivergence or bearishDivergenceCondition)
+
+// Mean Reversion Indicator
+meanReversion = plotMeanReversion ? ta.ema(close, emaPeriod) : na
+stdDev = plotMeanReversion ? ta.stdev(close, emaPeriod) : na
+upperBand2 = plotMeanReversion ? meanReversion + stdDev * bandMultiplier : na
+lowerBand2 = plotMeanReversion ? meanReversion - stdDev * bandMultiplier : na
+
+// Track the number of candles since entry
+var int lastentry = na
+var int lastshort = na
+
+if ((longEntryCondition or isBuySignal) and (na(lastentry) or bar_index - lastentry >= 4))
+    strategy.entry("EN", strategy.long)
+    strategy.exit("Exit Long", from_entry="EN", stop=low * 0.92)
+    lastentry := bar_index
+
+if (slowALMA > close and strategy.opentrades.profit(strategy.opentrades - 1) > 25)
+    strategy.close("EN")
+
+if (isSellSignal and (na(lastshort) or bar_index - lastshort >= 4))
+    strategy.close("EN")
+    lastshort := bar_index
+
+if shortEntryCondition
+    strategy.close("EN")
+
+// Plotting
+plotshape(longEntryCondition, title='BUY', style=shape.triangleup, text='B', location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+plotshape(shortEntryCondition, title='SELL', style=shape.triangledown, text='S', location=location.abovebar, color=color.new(color.red, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+
+plot(upperBand2, title='Upper Band', color=color.new(color.fuchsia, 0), linewidth=1)
+plot(meanReversion, title='Mean', color=color.new(color.gray, 0), linewidth=1)
+plot(lowerBand2, title='Lower Band', color=color.new(color.blue, 0), linewidth=1)
+
+// Entry signal alerts
+alertcondition(longEntryCondition, title='BUY Signal', message='Buy Entry Signal')
+alertcondition(shortEntryCondition, title='SELL Signal', message='Sell Entry Signal')
+alertcondition(longEntryCondition or shortEntryCondition, title='BUY or SELL Signal', message='Entry Signal')
