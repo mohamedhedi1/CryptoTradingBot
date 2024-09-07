@@ -1,48 +1,88 @@
 import ccxt
+import pandas as pd
+import numpy as np
 
-# Initialize Binance API client
-binance_client = ccxt.binance({
-    'apiKey': 'YOUR_API_KEY',
-    'secret': 'YOUR_API_SECRET',
+# Initialize exchange
+exchange = ccxt.binance({
+    'apiKey': '',
+    'secret': '',
 })
 
-# Set symbol and timeframe
 symbol = 'BTC/USDT'
-timeframe = '30m'
+timeframe = '1h'
 
-# LuxAlgo ALMA Cross
-lengthFast = 20
-lengthSlow = 50
-fastALMA = binance_client.sma(symbol=symbol, timeframe=timeframe, length=lengthFast)
-slowALMA = binance_client.sma(symbol=symbol, timeframe=timeframe, length=lengthSlow)
-isUpTrend = fastALMA > slowALMA
-isDownTrend = fastALMA < slowALMA
 
-# Kokoabe rsistratV21
-rsiLength = 50
-fako = binance_client.fetch_ticker(symbol)['close'] - binance_client.fetch_ticker(symbol)['close'][-rsiLength]
-isPositiveMomentum = fako > 0
+# Fetch historical data
+def fetch_ohlcv(symbol, timeframe):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
 
-# Alpha Trend Supertrend
-lengthSupertrend = 10
-multiplierSupertrend = 3.0
-hpf = binance_client.highest_price(symbol=symbol, timeframe=timeframe, length=3)
-lpf = binance_client.lowest_price(symbol=symbol, timeframe=timeframe, length=3)
-close = binance_client.fetch_ticker(symbol)['close']
-atr = max(hpf - lpf, abs(hpf - close[-1]), abs(lpf - close[-1]))
-upperBand = hpf + multiplierSupertrend * atr
-lowerBand = hpf - multiplierSupertrend * atr
-isAboveSupertrend = close[-1] > upperBand
-isBelowSupertrend = close[-1] < lowerBand
+# ALMA calculation
+def alma(src, length, offset, sigma):
+    m = (length - 1) / 2
+    s = length / sigma
+    w = np.exp(-((np.arange(length) - m) ** 2) / (2 * s ** 2))
+    w /= np.sum(w)
+    convolved = np.convolve(src, w, mode='valid')
+    
+    # Pad the result to match the length of the input
+    pad_width = len(src) - len(convolved)
+    return np.pad(convolved, (pad_width, 0), mode='constant', constant_values=np.nan)
 
-# Combine the conditions
-isBuySignal = isUpTrend and isPositiveMomentum
-isSellSignal = (close[-1] < binance_client.sma(symbol=symbol, timeframe=timeframe, length=165) and fako < -0.0163)
+# ATR calculation
+def atr(df, period=14):
+    df['tr'] = np.maximum((df['high'] - df['low']).abs(), 
+                          np.maximum((df['high'] - df['close'].shift(1)).abs(), 
+                                     (df['low'] - df['close'].shift(1)).abs()))
+    return df['tr'].rolling(window=period).mean()
 
-# Entry and exit logic
-if isBuySignal:
-    binance_client.create_market_buy_order(symbol=symbol, amount=0.001)  # Replace with your desired amount
-if isSellSignal:
-    binance_client.create_market_sell_order(symbol=symbol, amount=0.001)  # Replace with your desired amount
+# Supertrend calculation
+def supertrend(df, length, multiplier):
+    df['atr'] = atr(df, period=length)
+    df['hpf'] = df[['high', 'low', 'close']].mean(axis=1)
+    df['upperBand'] = df['hpf'] + multiplier * df['atr']
+    df['lowerBand'] = df['hpf'] - multiplier * df['atr']
+    df['isAboveSupertrend'] = df['close'] > df['upperBand']
+    df['isBelowSupertrend'] = df['close'] < df['lowerBand']
 
-# Note: The order placement functions above are simplified examples. You may need to include additional parameters, handle errors, and adjust the order types and amounts as per your specific requirements.
+# Fetch data and apply strategy
+df = fetch_ohlcv(symbol, timeframe)
+
+print(df)
+
+# Calculate ALMA
+df['fastALMA'] = alma(df['close'], 20, 0.85, 6)
+df['slowALMA'] = alma(df['close'], 50, 0.85, 6)
+
+# Trend and momentum detection
+df['isUpTrend'] = np.where(df['fastALMA'] > df['slowALMA'], 1, 0)
+df['isDownTrend'] = np.where(df['fastALMA'] < df['slowALMA'], 1, 0)
+df['fako'] = df['close'] - df['close'].shift(50)
+df['isPositiveMomentum'] = df['fako'] > 0
+
+# Supertrend
+supertrend(df, 10, 3.0)
+
+# Signals
+df['isBuySignal'] = (df['isUpTrend'] == 1) & (df['isPositiveMomentum'] == 1)
+df['isSellSignal'] = (df['close'] < df['close'].rolling(165).mean()) & (df['fako'] < -0.0163)
+
+# Function to place orders
+def place_order(symbol, side, amount):
+    try:
+        order = exchange.create_market_order(symbol, side, amount)
+        print(f'Order placed: {order}')
+    except Exception as e:
+        print(f'An error occurred: {e}')
+
+# Execute strategy
+for i in range(1, len(df)):
+    if df['isBuySignal'].iloc[i] and not df['isBuySignal'].iloc[i - 1]:
+        place_order(symbol, 'buy', 0.0001)  # Adjust amount as needed
+        print("i'm buying now")
+
+    if df['isSellSignal'].iloc[i] and not df['isSellSignal'].iloc[i - 1]:
+        place_order(symbol, 'sell', 0.0001)  # Adjust amount as needed
+        print("i'm selling now")

@@ -65,9 +65,3 @@ The script includes various input settings that allow you to customize the strat
 ## Disclaimer
 
 This script is provided for educational and informational purposes only. Trading involves risks, and past performance is not indicative of future results. Use this script at your own discretion.
-
-## License
-
-This script is released under the [MIT License](LICENSE).
-
-Feel free to explore and modify the script according to your trading preferences and risk tolerance.
